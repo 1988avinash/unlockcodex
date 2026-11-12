@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+# never commit a filled-in provider file, keys, or anything from an installation
+providers.json
+secrets/
+*.key
+state/
+state-startup/
+deployments/
+releases/
+current.json
+*.sqlite3
+*.log

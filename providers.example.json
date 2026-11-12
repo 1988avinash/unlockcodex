@@ -1,0 +1,47 @@
+{
+  "_help": [
+    "This file lists YOUR providers and models. API keys are never written here:",
+    "the installer asks for each provider's key and stores it encrypted for your Windows account.",
+    "",
+    "providers : one entry per provider. The id is a short lower-case name you choose.",
+    "            endpoint must be the provider's OpenAI *Responses* API URL (https://.../responses).",
+    "            The ids minimax, mimo and alibaba get provider-specific tuning; any other id is treated generically.",
+    "models    : one entry per model you want in the Codex model picker.",
+    "            provider        id from the providers section",
+    "            model           exact model id the provider expects",
+    "            name            label shown in Codex (optional)",
+    "            context_window  the model's context size in tokens (check your provider's documentation)",
+    "            image_input     true if the model accepts images (optional, default false)",
+    "            auto_fallback   true on the ONE model Codex should switch to automatically when your",
+    "                            ChatGPT allowance runs out (optional, default: the first model)",
+    "            protocol        leave out unless your provider implements Codex's 'responses-lite' format",
+    "",
+    "Replace everything below with your own values. Entries under _examples are ignored; copy from them if useful."
+  ],
+  "port": 8788,
+  "providers": {
+    "your-provider": { "endpoint": "https://api.example.com/v1/responses" }
+  },
+  "models": [
+    {
+      "provider": "your-provider",
+      "model": "your-model-id",
+      "name": "My Model",
+      "context_window": 128000,
+      "image_input": false,
+      "auto_fallback": true
+    }
+  ],
+  "_examples": {
+    "providers": {
+      "minimax": { "endpoint": "https://api.minimax.io/v1/responses" },
+      "mimo": { "endpoint": "https://token-plan-sgp.xiaomimimo.com/v1/responses" },
+      "alibaba": { "endpoint": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/responses" }
+    },
+    "models": [
+      { "provider": "minimax", "model": "<model id from your MiniMax plan>", "name": "MiniMax", "context_window": 200000, "auto_fallback": true },
+      { "provider": "mimo", "model": "<model id from your MiMo plan>", "name": "MiMo", "context_window": 200000, "protocol": "responses-lite" },
+      { "provider": "alibaba", "model": "<model id from your Alibaba plan>", "name": "Qwen", "context_window": 200000 }
+    ]
+  }
+}
