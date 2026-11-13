@@ -83,6 +83,30 @@ class RouteChanges(unittest.TestCase):
             guardctl.check_additive(bound, guardctl.parse_providers(moved))  # different automatic fallback
 
 
+class Repair(unittest.TestCase):
+    def test_only_the_codex_runtime_is_repinned_automatically(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            files = {name: folder / name for name in ('codex.exe', 'dep.py', 'python.exe', 'code.py')}
+            for name, path in files.items():
+                path.write_bytes(name.encode())
+            config = {'native_runtime': {'path': str(files['codex.exe']), 'sha256': guardctl.sha(files['codex.exe'])},
+                      'external_files': {str(files['dep.py']): guardctl.sha(files['dep.py'])},
+                      'python_runtime': {'path': str(files['python.exe']), 'sha256': guardctl.sha(files['python.exe'])},
+                      'package_root': str(folder), 'files': {'code.py': guardctl.sha(files['code.py'])}}
+            self.assertEqual(guardctl.changed_pins(config), (False, []))
+            files['codex.exe'].write_bytes(b'updated by the Store')                      # a Codex Desktop update
+            self.assertEqual(guardctl.changed_pins(config), (True, []))
+            files['codex.exe'].unlink()                                                 # the old package folder is gone
+            self.assertEqual(guardctl.changed_pins(config), (True, []))
+            files['codex.exe'].write_bytes(b'codex.exe')
+            for name in ('dep.py', 'python.exe', 'code.py'):                            # anything else must not be auto-trusted
+                files[name].write_bytes(b'tampered')
+                native, others = guardctl.changed_pins(config)
+                self.assertEqual((native, len(others)), (False, 1), name)
+                files[name].write_bytes(name.encode())
+
+
 class Release(unittest.TestCase):
     def test_release_is_runtime_only_and_stable(self):
         with tempfile.TemporaryDirectory() as folder:

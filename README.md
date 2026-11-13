@@ -85,7 +85,8 @@ OpenAI-only fields.
 | `guard set-key <provider>` | Store or replace a provider's API key. |
 | `guard stop` / `guard start` | Stop or start the gateway. |
 | `guard reconcile` | Archive any paused request so the affected chat can continue. |
-| `guard uninstall` | Stop, remove Codex's routing lines and the logon shortcut. |
+| `guard ensure` | Repair the gateway if a Codex Desktop update stopped it. Runs by itself at logon. |
+| `guard uninstall` | Stop, remove Codex's routing lines and the logon shortcuts. |
 
 **Adding models or updating:** edit `%LOCALAPPDATA%\CodexContinuityGuard\providers.json` (or `git pull`) and run
 `install.ps1` again. Models can be added, renamed and retuned at any time. They cannot be removed, and the
@@ -114,7 +115,13 @@ Then restart Codex Desktop.
 - **Hidden context does not transfer.** Encrypted reasoning and compacted context from one provider cannot be read by
   another. The gateway tells you when it continues with visible history only.
 - **Integrity checks are strict on purpose.** The service refuses to start if its own code, its virtualenv, or the
-  pinned Python or Codex executable changes. After a Codex Desktop or Python update, run `install.ps1` again.
+  pinned Python or Codex executable changes.
+- **Codex Desktop updates repair themselves.** Codex updates itself, which changes the runtime the service pins.
+  A second logon entry (`Codex Continuity Guard Repair`) waits for the normal start; if the service is still down
+  and *only* the Codex runtime changed (a file in the Microsoft Store's protected package folder), it re-pins it and
+  restarts, and records this in `ensure.log`. If anything else changed (the virtualenv, the Python runtime, the
+  release code) it does **not** trust it, leaves the service down, and logs the reason; `guard status` shows the last
+  line. Run `install.ps1` after reviewing such a change.
 - **Provider terms are yours to check.** Some plans restrict automated or third-party client use.
 - **Status.** Built and used daily on one Windows 11 machine with Codex Desktop 26.1103. The `minimax`, `mimo` and
   `alibaba` profiles were exercised against live endpoints; generic providers are covered by tests only. Codex

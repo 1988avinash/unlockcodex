@@ -7,7 +7,8 @@
   status      Show service health, routed models and any paused requests.
   start/stop  Start or stop the installed service.
   reconcile   Stop, archive every paused (uncertain) request, start again.
-  uninstall   Stop the service, restore Codex Desktop's routing, remove the logon entry.
+  ensure      Repair the service after a Codex Desktop update stopped it (runs at logon by itself).
+  uninstall   Stop the service, restore Codex Desktop's routing, remove the logon entries.
 
 Normally run through install.ps1 / guard.cmd, which use the private virtualenv.
 No API key, account id or capability token is ever printed.
@@ -197,7 +198,7 @@ def build_deployment(root, release, providers, codex_home, previous):
     service = load(release / 'continuity-v4' / 'production_service_v4.py', 'guard_service')
     sys.path[:0] = [str(release / folder) for folder in reversed(FOLDERS)]
     from native_quota import NativeQuotaError, qualified_executable
-    python = Path(sys.executable)
+    python = Path(sys.executable).with_name('python.exe')  # the logon repair runs under pythonw.exe
     if python.parent.parent != root / 'venv' or python.name.lower() != 'python.exe':
         fail(f'Run this through install.ps1 or guard.cmd so it uses the private virtualenv in {root / "venv"}.')
     account, openai_models, cold_model, _ = codex_inputs(codex_home)
@@ -442,6 +443,86 @@ def register_startup(release, deployment, manifest_sha):
     return {'plan_path': plan['plan_path'], 'plan_sha256': plan['plan_sha256']}
 
 
+# ---------------------------------------------------------------- self-repair after Codex updates
+
+REPAIR_LINK = 'Codex Continuity Guard Repair.lnk'
+STARTUP = r'Microsoft\Windows\Start Menu\Programs\Startup'
+
+
+def changed_pins(config):
+    """Split the service's pinned files into (Codex runtime changed?, every other changed file).
+
+    Only the Codex Desktop runtime may be re-pinned automatically: it lives in the Microsoft Store's
+    protected package folder and is replaced by Codex's own updates. Anything else that changed (the
+    virtualenv, the release code, the Python runtime) is never trusted without the user.
+    """
+    native = Path(config['native_runtime']['path'])
+    native_changed = not native.is_file() or sha(native) != config['native_runtime']['sha256']
+    others = [p for p, h in config['external_files'].items() if not Path(p).is_file() or sha(p) != h]
+    root = Path(config['package_root'])
+    others += [str(root / n) for n, h in config['files'].items() if not (root / n).is_file() or sha(root / n) != h]
+    python = config['python_runtime']
+    if not Path(python['path']).is_file() or sha(python['path']) != python['sha256']:
+        others.append(python['path'])
+    return native_changed, others
+
+
+def register_repair(root, codex_home):
+    """A second logon entry: waits for the normal start, then repairs it if it did not come up."""
+    link = Path(os.environ['APPDATA']) / STARTUP / REPAIR_LINK
+    arguments = subprocess.list2cmdline(['-B', str(root / 'guardctl.py'), '--root', str(root), '--codex-home', str(codex_home), 'ensure'])
+    quote = lambda value: str(value).replace("'", "''")
+    code, out, err = powershell(
+        f"$w=New-Object -ComObject WScript.Shell;$l=$w.CreateShortcut('{quote(link)}');"
+        f"$l.TargetPath='{quote(root / 'venv' / 'Scripts' / 'pythonw.exe')}';$l.Arguments='{quote(arguments)}';"
+        f"$l.WorkingDirectory='{quote(root)}';$l.WindowStyle=7;$l.Description='Codex Continuity Guard repair';$l.Save()")
+    if code:
+        print(f'  Note: the repair-at-logon entry could not be created ({err or out}).')
+
+
+def remove_repair():
+    link = Path(os.environ['APPDATA']) / STARTUP / REPAIR_LINK
+    if link.exists():
+        link.unlink()
+        return True
+    return False
+
+
+def cmd_ensure(args):
+    """Run at logon (and by hand): leave a healthy service alone, repair a Codex-update outage, report anything else."""
+    import contextlib
+    with (args.root / 'ensure.log').open('a', encoding='utf-8') as out:
+        def stamp(text):
+            print(time.strftime('%Y-%m-%d %H:%M:%S ') + text, file=out, flush=True)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            try:
+                installed = Installed(args.root)
+                if not installed.record:
+                    return
+                deadline = time.time() + args.wait
+                while time.time() < deadline:  # the normal logon start gets its chance first
+                    if health(installed.config):
+                        stamp('Service is healthy; nothing to repair.')
+                        return
+                    time.sleep(3)
+                native_changed, others = changed_pins(installed.config)
+                if others:
+                    stamp(f'NOT REPAIRED: {len(others)} pinned file(s) changed that are not the Codex runtime '
+                          f'(first: {others[0]}). Review the change, then run: guard install')
+                elif native_changed:
+                    stamp('Codex Desktop was updated: re-pinning its runtime and restarting.')
+                    # Repeat the original install, including its choice about the logon entries.
+                    cmd_install(argparse.Namespace(root=args.root, codex_home=args.codex_home, yes=True, reuse_release=True,
+                                                   no_startup=installed.record.get('startup') is None))
+                    stamp('Repaired; the service is healthy on the updated Codex runtime.')
+                else:
+                    stamp('Nothing changed but the service is down: starting it.')
+                    live = start(args.root, installed.release, installed.deployment, installed.record['manifest_sha256'], installed.config)
+                    stamp(f'Started (pid {live["pid"]}).')
+            except (SystemExit, Exception) as error:  # never leave an unexplained failure
+                stamp('REPAIR FAILED: ' + str(error).strip())
+
+
 # ---------------------------------------------------------------- commands
 
 def credentials_module(root, release):
@@ -452,14 +533,15 @@ def credentials_module(root, release):
 
 def cmd_install(args):
     root, codex_home, interactive = args.root, args.codex_home, not args.yes
-    if not SOURCE.is_dir():
+    reuse = getattr(args, 'reuse_release', False)  # the logon repair re-pins the installed release; it has no source folder
+    if not reuse and not SOURCE.is_dir():
         fail('install must be run from the downloaded repository folder (it contains runtime\\).')
     root.mkdir(parents=True, exist_ok=True)
     codex_inputs(codex_home)  # fail early, before anything is written or stopped
     providers = read_providers(root, interactive)
     if bound_routes(root):
         check_additive(bound_routes(root), providers)
-    release = build_release(root)
+    release = Installed(root).require().release if reuse else build_release(root)
     ensure_keys(credentials_module(root, release), providers['providers'], interactive)
     old = Installed(root)
     print('\nBuilding and verifying the pinned configuration (hashing the virtualenv takes a moment)...')
@@ -482,6 +564,8 @@ def cmd_install(args):
         (root / 'current.json').write_text(json.dumps(record, indent=2), encoding='utf-8')
     if HERE != root:
         shutil.copyfile(HERE / 'guardctl.py', root / 'guardctl.py')
+    if not args.no_startup:
+        register_repair(root, codex_home)
     (root / 'guard.cmd').write_text('@"%~dp0venv\\Scripts\\python.exe" -B "%~dp0guardctl.py" %*\r\n', encoding='ascii')
     print('\n' + '=' * 72 + '\n  INSTALLED\n' + '=' * 72)
     print(f'  Service:   http://127.0.0.1:{config["port"]} (healthy, pid {live["pid"]})')
@@ -511,6 +595,9 @@ def cmd_status(args):
     installed = Installed(args.root).require()
     live = health(installed.config)
     print('Service:    ' + (f'healthy on 127.0.0.1:{installed.config["port"]} (pid {live["pid"]})' if live else 'NOT RUNNING  (run: guard start)'))
+    log = args.root / 'ensure.log'
+    if not live and log.is_file() and log.read_text(encoding='utf-8').strip():
+        print('Last repair: ' + log.read_text(encoding='utf-8').strip().splitlines()[-1])
     print('Release:    ' + installed.release.name)
     credentials = credentials_module(args.root, installed.release)
     for spec in installed.config['route_specs']:
@@ -559,6 +646,8 @@ def cmd_uninstall(args):
             print('Logon startup entry removed.')
         except registration.RegistrationBlocked as error:
             print(f'Logon startup entry left in place ({error}); delete "Codex Continuity Guard" from your Startup folder by hand.')
+    if remove_repair():
+        print('Logon repair entry removed.')
     (args.root / 'current.json').unlink()
     print('Uninstalled. Restart Codex Desktop. Your chat state and encrypted keys remain in\n  '
           + str(args.root) + '\n  (delete that folder, or run uninstall.ps1 -Purge, to remove them).')
@@ -574,6 +663,8 @@ def main():
     install.add_argument('--yes', action='store_true', help='never prompt; fail if providers.json or a key is missing')
     install.add_argument('--no-startup', action='store_true', help='do not register a start-at-logon entry')
     commands.add_parser('set-key').add_argument('provider')
+    ensure = commands.add_parser('ensure', help='repair the service if a Codex Desktop update stopped it (runs at logon)')
+    ensure.add_argument('--wait', type=int, default=150, help='seconds to wait for the normal start first')
     for name in ('status', 'start', 'stop', 'reconcile', 'uninstall'):
         commands.add_parser(name)
     args = parser.parse_args()
@@ -581,7 +672,7 @@ def main():
         fail('Codex Continuity Guard supports Windows only.')
     args.root, args.codex_home = args.root.absolute(), args.codex_home.absolute()
     {'install': cmd_install, 'set-key': cmd_set_key, 'status': cmd_status, 'start': cmd_start, 'stop': cmd_stop,
-     'reconcile': cmd_reconcile, 'uninstall': cmd_uninstall}[args.command](args)
+     'reconcile': cmd_reconcile, 'uninstall': cmd_uninstall, 'ensure': cmd_ensure}[args.command](args)
 
 
 if __name__ == '__main__':
