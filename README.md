@@ -62,7 +62,7 @@ Finally, **quit and reopen Codex Desktop**. Your models appear in the model pick
 | Field | Meaning |
 |---|---|
 | `providers.<id>.endpoint` | The provider's HTTPS Responses API URL. One endpoint per provider id. |
-| `models[].provider` / `model` | Which provider, and the exact model id it expects. |
+| `models[].provider` / `model` | Which provider, and the exact model id it expects. The provider's Responses reply must name that same id in its `model` field: the gateway rejects a reply from a different model, so a provider that answers with a dated or renamed alias will not work. |
 | `models[].name` | Label shown in Codex (optional). |
 | `models[].context_window` | The model's context size in tokens. Take it from your provider's documentation. |
 | `models[].image_input` | `true` if the model accepts images (default `false`). |
@@ -119,11 +119,15 @@ Then restart Codex Desktop.
 - **Codex Desktop updates repair themselves.** Codex updates itself, which changes the runtime the service pins.
   A second logon entry (`Codex Continuity Guard Repair`) waits for the normal start; if the service is still down
   and *only* the Codex runtime changed (a file in the Microsoft Store's protected package folder), it re-pins it and
-  restarts, and records this in `ensure.log`. If anything else changed (the virtualenv, the Python runtime, the
-  release code) it does **not** trust it, leaves the service down, and logs the reason; `guard status` shows the last
-  line. Run `install.ps1` after reviewing such a change.
+  restarts, and records this in `ensure.log`. The same step refreshes the model list that Codex Desktop shows.
+  If anything else changed (the virtualenv, the Python runtime, the release code) it does **not** trust it, leaves
+  the service down, and logs the reason; `guard status` shows the last line. Run `install.ps1` after reviewing such
+  a change. After a Codex update, restart Codex Desktop once so it reads the refreshed model list.
+- **Upgrades are rehearsed first.** When you add models and run `install.ps1` again, the change is first tried on
+  consistent copies of your chat state while the running service is left alone; if it cannot be applied, nothing is
+  stopped or changed.
 - **Provider terms are yours to check.** Some plans restrict automated or third-party client use.
-- **Status.** Built and used daily on one Windows 11 machine with Codex Desktop 26.1103. The `minimax`, `mimo` and
+- **Status.** Built and used daily on one Windows 11 machine, through Codex Desktop 26.1103 to 26.1106. The `minimax`, `mimo` and
   `alibaba` profiles were exercised against live endpoints; generic providers are covered by tests only. Codex
   Desktop updates can change its internal API and break this until it is updated. An experimental bridge for a
   signed-in agent CLI is present in the source but is not installable.

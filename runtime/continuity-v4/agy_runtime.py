@@ -20,7 +20,7 @@ from production_service_v4 import private_state
 from agy_bridge import AgyError,decode_result,validate_event
 
 EXE=Path(os.environ.get('LOCALAPPDATA',''))/'agy/bin/agy.exe'
-EXE_SHA256='fe9eb2f3884ca6cd630c57eed117580819341bce4b87d2c40b441ddd01cb8f2a'
+EXE_SHA256='545b72926b3b8807f0622a36c0ce6a11a242c9e4e0f3ee84cbb0396193c8194c'
 MODEL='gemini-3.8-flash-low'
 SCHEMA={'type':'object','properties':{'kind':{'const':'message'},'text':{'type':'string'}},'required':['kind','text'],'additionalProperties':False}
 SETTINGS={'modelProvider':'','useG1Credits':False,'toolPermission':'strict','agentMode':'plan','allowNonWorkspaceAccess':False,

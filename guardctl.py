@@ -262,26 +262,53 @@ def check_additive(bound, providers):
              'Keep "auto_fallback": true on that model, or start from scratch with uninstall.ps1 -Purge.')
 
 
+def migrate_routes(gateway, release, bound, new):
+    """Additive migration of a gateway state folder: the registry (strict) and every chat's plan ledger."""
+    sys.path[:0] = [str(release / folder) for folder in reversed(FOLDERS)]
+    import gateway_v4
+    from route_policy import PlanPolicy
+    from route_registry import RouteRegistry, RouteSpec
+    old_routes, new_routes = (RouteRegistry([RouteSpec(**s) for s in c['route_specs']], auto_fallback_id=c['auto_fallback_id'])
+                              for c in (bound, new))
+    gateway_v4.Registry.migrate_route_expansion(gateway / 'registry.sqlite3', old_routes, new_routes)
+    labels = [{s.route_id: s.display_name or s.route_id for s in r.routes} for r in (old_routes, new_routes)]
+    notes = []
+    for ledger in gateway.glob('*/quota.sqlite3'):
+        try:
+            PlanPolicy.migrate_route_expansion(ledger, old_routes=labels[0], new_routes=labels[1],
+                                               auto_fallback_id=new['auto_fallback_id'])
+        except (ValueError, sqlite3.Error) as error:  # one odd chat must not block the whole gateway
+            notes.append(f'chat state {ledger.parent.name[:8]} was not migrated ({error})')
+    return notes
+
+
+def rehearse_route_migration(root, release, config):
+    """Run the migration on consistent copies while the old service still runs, so a failure stops the upgrade
+    before anything is stopped or changed."""
+    new = {'route_specs': config['route_specs'], 'auto_fallback_id': config['auto_fallback_id']}
+    bound, source = bound_routes(root), root / 'state' / 'gateway'
+    if not bound or bound == new:
+        return
+    import tempfile
+    with tempfile.TemporaryDirectory() as folder:
+        for path in [source / 'registry.sqlite3', *source.glob('*/quota.sqlite3')]:
+            copy = Path(folder) / path.relative_to(source)
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            with closing(sqlite3.connect(path, timeout=5)) as src, closing(sqlite3.connect(copy)) as dst:
+                src.backup(dst)
+        try:
+            migrate_routes(Path(folder), release, bound, new)
+        except (ValueError, sqlite3.Error) as error:
+            fail(f'The new model list cannot be applied to your existing chats ({error}). The running service was not touched.')
+
+
 def bind_state_routes(root, release, config):
     """Explicit additive migration of the stopped service's state to the new model list."""
     new = {'route_specs': config['route_specs'], 'auto_fallback_id': config['auto_fallback_id']}
     bound = bound_routes(root)
     if bound and bound != new:
-        sys.path[:0] = [str(release / folder) for folder in reversed(FOLDERS)]
-        import gateway_v4
-        from route_policy import PlanPolicy
-        from route_registry import RouteRegistry, RouteSpec
-        old_routes, new_routes = (RouteRegistry([RouteSpec(**s) for s in c['route_specs']], auto_fallback_id=c['auto_fallback_id'])
-                                  for c in (bound, new))
-        gateway = root / 'state' / 'gateway'
-        gateway_v4.Registry.migrate_route_expansion(gateway / 'registry.sqlite3', old_routes, new_routes)
-        labels = [{s.route_id: s.display_name or s.route_id for s in r.routes} for r in (old_routes, new_routes)]
-        for ledger in gateway.glob('*/quota.sqlite3'):
-            try:
-                PlanPolicy.migrate_route_expansion(ledger, old_routes=labels[0], new_routes=labels[1],
-                                                   auto_fallback_id=new['auto_fallback_id'])
-            except (ValueError, sqlite3.Error) as error:  # one odd chat must not block the whole gateway
-                print(f'  Note: chat state {ledger.parent.name[:8]} was not migrated ({error}).')
+        for note in migrate_routes(root / 'state' / 'gateway', release, bound, new):
+            print('  Note: ' + note + '.')
     (root / 'state-routes.json').write_text(json.dumps(new, indent=2), encoding='utf-8')
 
 
@@ -547,6 +574,8 @@ def cmd_install(args):
     print('\nBuilding and verifying the pinned configuration (hashing the virtualenv takes a moment)...')
     deployment, manifest_sha = build_deployment(root, release, providers, codex_home, old.config if old.record else None)
     config = json.loads((deployment / 'service-config.json').read_bytes())
+    if old.record:
+        rehearse_route_migration(root, release, config)
     if old.record and stop(old):
         print('Stopped the previous service.')
     archived = archive_open_requests(root, release, 'installer_restart')
